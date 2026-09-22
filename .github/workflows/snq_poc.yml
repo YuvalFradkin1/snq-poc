@@ -1,0 +1,53 @@
+name: SNQ-1 PoC v5
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  poc:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provenance
+        run: sw_vers && swift --version
+      - name: Clone swift-nio-quic 0.2.2
+        run: |
+          git clone --depth=1 --branch 0.2.2 \
+            https://github.com/apple/swift-nio-quic.git snq
+          git -C snq describe --tags
+          sed -n '260,265p' snq/Sources/NIOQUIC/SwiftNetwork/QUICPacketHeader.swift
+      - name: Inject test
+        run: |
+          cp inject/snq1_test.swift snq/Tests/NIOQUICTests/snq1_test.swift
+      - name: Build 0.2.2
+        run: cd snq && swift build 2>&1 | tee /tmp/build.log
+        continue-on-error: true
+      - name: Run PoC on 0.2.2
+        run: cd snq && swift test --filter snq1ShortHeaderTooSmallForDCID 2>&1 | tee /tmp/test.log
+        continue-on-error: true
+      - name: Clone 0.3.0 control
+        run: |
+          git clone --depth=1 --branch 0.3.0 \
+            https://github.com/apple/swift-nio-quic.git snq_patched
+          cp inject/snq1_test.swift snq_patched/Tests/NIOQUICTests/snq1_test.swift
+      - name: Run control on 0.3.0
+        run: cd snq_patched && swift test --filter snq1ShortHeaderTooSmallForDCID 2>&1 | tee /tmp/control.log
+        continue-on-error: true
+      - name: Assert
+        if: always()
+        run: |
+          echo "=== BUILD ===" && tail -15 /tmp/build.log || true
+          echo "=== 0.2.2 (should crash) ===" && cat /tmp/test.log || true
+          echo "=== 0.3.0 (should pass) ===" && cat /tmp/control.log || true
+          grep -qE 'Fatal error|Unexpectedly found nil|SIGABRT|exited with signal' /tmp/test.log && \
+            echo "[!] SNQ-1 CONFIRMED ON REAL TARGET" || echo "[?] check logs"
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snq-poc-results
+          path: |
+            /tmp/build.log
+            /tmp/test.log
+            /tmp/control.log
